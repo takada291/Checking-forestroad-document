@@ -81,7 +81,7 @@
 <body>
 
     <div class="container">
-        <h1>クローラ明細確認 v0.2</h1>
+        <h1>クローラ明細確認 v0.3</h1>
         
         <div class="api-note">
             <strong>APIキー設定（初回のみ）</strong><br>
@@ -111,7 +111,6 @@
                     <tr>
                         <th>測点</th>
                         <th>単距離</th>
-                        <th>追加距離</th>
                         <th>標準単価</th>
                         <th>平均単価</th>
                         <th>直接工事費</th>
@@ -136,7 +135,7 @@
         const savedKey = localStorage.getItem('gemini_api_key_check');
         if(savedKey) apiKeyInput.value = savedKey;
 
-        // モデル自動検出（AI木工のロジックを採用、OCRに強いProを優先）
+        // モデル自動検出（OCRに強いProを優先）
         async function findAvailableModel(apiKey) {
             try {
                 loadingDetail.innerText = "最適なAIモデルを探しています...";
@@ -152,7 +151,6 @@
                     !m.name.includes("gemini-2.0") 
                 );
 
-                // 画像の文字認識にはProモデルの方が圧倒的に精度が高いため優先
                 let bestModel = capableModels.find(m => m.name.includes("gemini-1.5-pro"));
                 if (!bestModel) bestModel = capableModels.find(m => m.name.includes("gemini-1.5-flash"));
                 if (!bestModel && capableModels.length > 0) bestModel = capableModels[0];
@@ -201,16 +199,15 @@
                 const genAI = new GoogleGenerativeAI(apiKey);
                 const model = genAI.getGenerativeModel({ model: modelName });
 
-                // プロンプトを強化：AIの勝手な計算（忖度）を禁止
+                // プロンプトから「追加距離」の要素を削除して高速化
                 const prompt = `
                     あなたは建設現場の設計書を厳密にチェックするアシスタントです。
                     添付された画像は、連続した森林作業道の「直接工事費明細表」です。
                     画像1枚目から順番に表のデータ行を読み取り、以下のJSONフォーマットで出力してください。
 
                     【非常に重要：計算間違いを探すためのチェックツールです】
-                    画像の中の数値には、わざと計算間違いや異常な数値が含まれています。（例：999など）
+                    画像の中の数値には、わざと計算間違いや異常な数値が含まれています。
                     あなたは絶対に数値を自動計算で修正しないでください！
-                    画像に「999」と書いてあれば、前後の計算上おかしくても必ず「999」と出力してください。
                     見たままの数値をそのままJSONに抽出することが最大の任務です。
 
                     {
@@ -218,7 +215,6 @@
                         {
                           "sokuten": "A-1",
                           "tan_kyori": 17.0,
-                          "tsuika_kyori": 17.0,
                           "hyojun_tanka": 578,
                           "heikin_tanka": 578,
                           "kojihi": 9826
@@ -250,7 +246,6 @@
                 tbody.innerHTML = '';
                 
                 let prevTanka = 0;
-                let expectedTsuika = 0;
                 let calcTotalKojihi = 0;
                 let calcTotalKyori = 0;
                 let errorCount = 0;
@@ -263,7 +258,7 @@
                     let currentTanka = row.hyojun_tanka || 0;
                     let tanKyori = row.tan_kyori || 0;
 
-                    // ★重要仕様：測点が「-BP」で終わる行は、エクセル上で上の行が空白のため前行単価が0円扱いになる
+                    // 測点が「-BP」で終わる行は前行単価が0円扱い
                     if (row.sokuten && row.sokuten.includes('-BP')) {
                         prevTanka = 0;
                     }
@@ -287,13 +282,6 @@
                         }
                         calcTotalKojihi += expectedKojihi;
                         calcTotalKyori += tanKyori;
-
-                        // 3. 追加距離の検算
-                        expectedTsuika = Math.round((expectedTsuika + tanKyori) * 10) / 10;
-                        if (row.tsuika_kyori !== null && row.tsuika_kyori !== expectedTsuika) {
-                            isError = true;
-                            errorDetails.push(`追加距離 NG (正解: ${expectedTsuika})`);
-                        }
                     }
 
                     // 次の行のために単価を記憶
@@ -307,10 +295,6 @@
                     tr.innerHTML = `
                         <td>${row.sokuten || ''}</td>
                         <td>${tanKyori > 0 ? tanKyori : ''}</td>
-                        <td>
-                            ${row.tsuika_kyori !== null ? row.tsuika_kyori : ''}
-                            ${errorDetails.filter(e => e.includes('追加距離')).map(e => `<span class="error-text">${e}</span>`).join('')}
-                        </td>
                         <td>${currentTanka.toLocaleString()}</td>
                         <td>
                             ${row.heikin_tanka !== null ? row.heikin_tanka.toLocaleString() : ''}
@@ -343,7 +327,7 @@
 
                 summaryHTML += `
                     <ul>
-                        <li><strong>最終追加距離:</strong> 設計書 ${data.total_kyori}m (正確な検算: ${calcTotalKyori}m) ${isTotalKyoriMatch ? '✅' : '❌'}</li>
+                        <li><strong>単距離の合計値:</strong> 設計書 ${data.total_kyori}m (正確な検算: ${calcTotalKyori}m) ${isTotalKyoriMatch ? '✅' : '❌'}</li>
                         <li><strong>直接工事費計:</strong> 設計書 ${data.total_kojihi ? data.total_kojihi.toLocaleString() : '読取不可'}円 (正確な検算: ${calcTotalKojihi.toLocaleString()}円) ${isTotalKojihiMatch ? '✅' : '❌'}</li>
                     </ul>
                 `;
