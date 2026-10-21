@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>森林作業道 設計書チェッカー</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "@google/generative-ai": "https://esm.run/@google/generative-ai"
+        }
+      }
+    </script>
+    <style>
+        :root {
+            --primary: #2c3e50;
+            --bg-color: #f8f9fa;
+            --accent: #0056b3;
+            --error-bg: #ffe6e6;
+            --success-bg: #e6ffe6;
+        }
+        body {
+            font-family: "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: #333;
+            margin: 0; padding: 20px; line-height: 1.6;
+        }
+        h1 {
+            color: var(--primary);
+            text-align: center;
+            border-bottom: 3px solid var(--accent);
+            padding-bottom: 10px;
+        }
+        .container {
+            max-width: 900px; margin: 0 auto;
+            background: white; padding: 20px;
+            border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .input-group { margin-bottom: 15px; }
+        label {
+            display: block; font-weight: bold; margin-bottom: 5px;
+            color: var(--primary); font-size: 0.9rem;
+        }
+        input[type="password"], input[type="file"] {
+            width: 100%; padding: 10px; border: 1px solid #ccc;
+            border-radius: 4px; box-sizing: border-box;
+        }
+        .btn-run {
+            width: 100%; padding: 15px; background-color: var(--accent);
+            color: white; border: none; border-radius: 4px;
+            font-size: 1.2rem; font-weight: bold; cursor: pointer;
+        }
+        .btn-run:hover { background-color: #004494; }
+        .btn-run:disabled { background-color: #ccc; cursor: not-allowed; }
+        .api-note {
+            font-size: 0.8rem; color: #666; background: #eee;
+            padding: 10px; border-radius: 4px; margin-bottom: 20px;
+        }
+        #loading-msg {
+            text-align: center; font-weight: bold; color: var(--accent);
+            display: none; margin-top: 20px;
+        }
+        #result-area { display: none; margin-top: 30px; }
+        table {
+            width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9rem;
+        }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: right; }
+        th { background-color: var(--primary); color: white; text-align: center; }
+        td:first-child { text-align: center; font-weight: bold; }
+        .error-row { background-color: var(--error-bg); }
+        .error-text { color: red; font-size: 0.8rem; display: block; }
+        .summary-box {
+            background: var(--success-bg); padding: 15px; border-radius: 5px;
+            margin-bottom: 20px; border: 1px solid #b3ffb3;
+        }
+        .summary-box.has-error {
+            background: var(--error-bg); border-color: #ffb3b3;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>森林作業道 設計書AIチェッカー</h1>
+        
+        <div class="api-note">
+            <strong>APIキー設定（初回のみ）</strong><br>
+            ブラウザに保存されるため、次回以降の入力は不要です。
+        </div>
+        <div class="input-group">
+            <input type="password" id="api-key" placeholder="Google Gemini APIキーを入力">
+        </div>
+
+        <div class="input-group">
+            <label>設計書（複数枚）の写真を一括選択してください</label>
+            <input type="file" id="image-upload" accept="image/*" multiple>
+        </div>
+        
+        <button class="btn-run" id="btn-run">画像を読み込んで検算スタート</button>
+        
+        <div id="loading-msg">
+            ⏳ AIが表を読み取り、JSが検算中です...<br>
+            <span style="font-size: 0.8rem; color:#666;">※複数枚ある場合は少し時間がかかります</span>
+        </div>
+
+        <div id="result-area">
+            <div id="summary-area" class="summary-box"></div>
+            <h3>検算結果明細</h3>
+            <table id="result-table">
+                <thead>
+                    <tr>
+                        <th>測点</th>
+                        <th>単距離</th>
+                        <th>追加距離</th>
+                        <th>標準単価</th>
+                        <th>平均単価</th>
+                        <th>直接工事費</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script type="module">
+        import { GoogleGenerativeAI } from "@google/generative-ai";
+
+        const btn = document.getElementById('btn-run');
+        const loading = document.getElementById('loading-msg');
+        const resultArea = document.getElementById('result-area');
+        const apiKeyInput = document.getElementById('api-key');
+        const imageInput = document.getElementById('image-upload');
+
+        // APIキーの復元
+        const savedKey = localStorage.getItem('gemini_api_key_check');
+        if(savedKey) apiKeyInput.value = savedKey;
+
+        // 画像ファイルをGemini API用に変換
+        async function fileToGenerativePart(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    resolve({
+                        inlineData: {
+                            data: reader.result.split(',')[1],
+                            mimeType: file.type
+                        }
+                    });
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        btn.addEventListener('click', async () => {
+            const apiKey = apiKeyInput.value.trim();
+            const files = imageInput.files;
+            
+            if(!apiKey) { alert('APIキーを入力してください'); return; }
+            if(files.length === 0) { alert('設計書の画像を選択してください'); return; }
+            
+            localStorage.setItem('gemini_api_key_check', apiKey);
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            resultArea.style.display = 'none';
+
+            try {
+                const genAI = new GoogleGenerativeAI(apiKey);
+                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+                const prompt = `
+                    添付された画像は、連続した森林作業道の「直接工事費明細表」です。
+                    画像1枚目から順番に表のデータ行を読み取り、以下のJSONフォーマットで出力してください。
+
+                    {
+                      "rows": [
+                        {
+                          "sokuten": "A-1",
+                          "tan_kyori": 17.0,
+                          "tsuika_kyori": 17.0,
+                          "hyojun_tanka": 578,
+                          "heikin_tanka": 578,
+                          "kojihi": 9826
+                        }
+                      ],
+                      "total_kyori": 1285.8,
+                      "total_kojihi": 2663196
+                    }
+
+                    【厳守事項】
+                    ・空欄のセルは null にしてください。
+                    ・カンマは除外して数値(Number)にしてください。
+                    ・「直接工事費計」などの最終合計行の値を、total_kyoriとtotal_kojihiに入れてください。
+                    ・Markdownブロック(\`\`\`json)は不要です。純粋なJSONのみを返してください。
+                `;
+
+                // 複数画像をすべて処理
+                const imageParts = await Promise.all([...files].map(fileToGenerativePart));
+                
+                // プロンプトと画像群をAIに送信
+                const result = await model.generateContent([prompt, ...imageParts]);
+                let text = await result.response.text();
+                text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+                
+                const data = JSON.parse(text);
+                
+                // ======= JavaScriptによる検算エンジン =======
+                const tbody = document.querySelector('#result-table tbody');
+                tbody.innerHTML = '';
+                
+                let prevTanka = 0;
+                let expectedTsuika = 0;
+                let calcTotalKojihi = 0;
+                let calcTotalKyori = 0;
+                let errorCount = 0;
+
+                data.rows.forEach((row, index) => {
+                    let tr = document.createElement('tr');
+                    let isError = false;
+                    let errorDetails = [];
+
+                    let currentTanka = row.hyojun_tanka || 0;
+                    let tanKyori = row.tan_kyori || 0;
+
+                    // 1. 標準単価平均の検算: INT((前行 + 当該行) / 2)
+                    let expectedHeikin = Math.floor((prevTanka + currentTanka) / 2);
+                    if (row.heikin_tanka !== null && row.heikin_tanka !== expectedHeikin) {
+                        isError = true;
+                        errorDetails.push(`平均単価 NG (正解: ${expectedHeikin})`);
+                    }
+
+                    // 2. 直接工事費の検算: INT(単距離 * 平均単価)
+                    let expectedKojihi = null;
+                    if (tanKyori > 0) {
+                        expectedKojihi = Math.floor(tanKyori * expectedHeikin);
+                        if (row.kojihi !== null && row.kojihi !== expectedKojihi) {
+                            isError = true;
+                            errorDetails.push(`工事費 NG (正解: ${expectedKojihi.toLocaleString()})`);
+                        }
+                        calcTotalKojihi += expectedKojihi;
+                        calcTotalKyori += tanKyori;
+
+                        // 3. 追加距離の検算
+                        expectedTsuika = Math.round((expectedTsuika + tanKyori) * 10) / 10;
+                        if (row.tsuika_kyori !== null && row.tsuika_kyori !== expectedTsuika) {
+                            isError = true;
+                            errorDetails.push(`追加距離 NG (正解: ${expectedTsuika})`);
+                        }
+                    }
+
+                    // 次の行のために単価を記憶
+                    prevTanka = currentTanka;
+
+                    if (isError) {
+                        tr.className = 'error-row';
+                        errorCount++;
+                    }
+
+                    tr.innerHTML = `
+                        <td>${row.sokuten || ''}</td>
+                        <td>${tanKyori > 0 ? tanKyori : ''}</td>
+                        <td>${row.tsuika_kyori || ''}</td>
+                        <td>${currentTanka.toLocaleString()}</td>
+                        <td>
+                            ${row.heikin_tanka !== null ? row.heikin_tanka.toLocaleString() : ''}
+                            ${errorDetails.filter(e => e.includes('平均単価')).map(e => `<span class="error-text">${e}</span>`).join('')}
+                        </td>
+                        <td>
+                            ${row.kojihi !== null ? row.kojihi.toLocaleString() : ''}
+                            ${errorDetails.filter(e => e.includes('工事費')).map(e => `<span class="error-text">${e}</span>`).join('')}
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                // ======= 総合判定 =======
+                const summaryArea = document.getElementById('summary-area');
+                let summaryHTML = '';
+                
+                // 距離と金額の総合計チェック (小数誤差を防ぐための丸め)
+                calcTotalKyori = Math.round(calcTotalKyori * 10) / 10;
+                let isTotalKojihiMatch = calcTotalKojihi === data.total_kojihi;
+                let isTotalKyoriMatch = calcTotalKyori === data.total_kyori;
+
+                if (errorCount === 0 && isTotalKojihiMatch && isTotalKyoriMatch) {
+                    summaryArea.className = 'summary-box';
+                    summaryHTML = `<h3>✅ すべての計算が正確です</h3>`;
+                } else {
+                    summaryArea.className = 'summary-box has-error';
+                    summaryHTML = `<h3>⚠️ 計算エラーが ${errorCount} 箇所見つかりました</h3>`;
+                }
+
+                summaryHTML += `
+                    <ul>
+                        <li><strong>最終追加距離:</strong> ${data.total_kyori}m (JS検算: ${calcTotalKyori}m) ${isTotalKyoriMatch ? '✅' : '❌'}</li>
+                        <li><strong>直接工事費計:</strong> ${data.total_kojihi ? data.total_kojihi.toLocaleString() : '読取不可'}円 (JS検算: ${calcTotalKojihi.toLocaleString()}円) ${isTotalKojihiMatch ? '✅' : '❌'}</li>
+                    </ul>
+                `;
+                summaryArea.innerHTML = summaryHTML;
+
+                resultArea.style.display = 'block';
+
+            } catch (error) {
+                console.error(error);
+                alert('エラーが発生しました。画像が不鮮明か、APIの混雑が原因の可能性があります。\n' + error.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>
