@@ -87,12 +87,34 @@
         .summary-box.has-error {
             background: var(--error-bg); border-color: #ffb3b3;
         }
+        /* 追加：手動編集用の入力フォームのスタイル */
+        .editable-input {
+            width: 100%;
+            max-width: 90px;
+            padding: 4px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            text-align: right;
+            font-family: inherit;
+            font-size: 0.9rem;
+            background-color: #fff;
+        }
+        .editable-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 3px rgba(0, 86, 179, 0.5);
+        }
+        .editable-input.edited {
+            background-color: #fff3cd; /* 編集されたセルは薄い黄色に */
+            border-color: #ffeeba;
+            color: #856404;
+        }
     </style>
 </head>
 <body>
 
     <div class="container">
-        <h1>クローラ明細確認 v0.5</h1>
+        <h1>クローラ明細確認 v0.6</h1>
         
         <div class="api-note">
             <strong>APIキー設定（初回のみ）</strong><br>
@@ -116,6 +138,7 @@
 
         <div id="result-area">
             <div id="summary-area" class="summary-box"></div>
+            <p style="font-size: 0.85rem; color: #666; margin-bottom: 5px;">※表内の数値は直接クリックして修正できます。修正すると即座に再計算されます。</p>
             <h3>検算結果明細</h3>
             <table id="result-table">
                 <thead>
@@ -142,6 +165,8 @@
         const apiKeyInput = document.getElementById('api-key');
         const imageInput = document.getElementById('image-upload');
 
+        let currentData = null; // AIが読み取ったデータをグローバルで保持
+
         // APIキーの復元
         const savedKey = localStorage.getItem('gemini_api_key_check');
         if(savedKey) apiKeyInput.value = savedKey;
@@ -154,8 +179,6 @@
                 if (!response.ok) throw new Error("モデルリストの取得に失敗"); 
                 
                 const data = await response.json(); 
-                
-                // ★修正箇所: 正しい論理和演算子 (||) に修正しました
                 const models = data.models || []; 
                 
                 const capableModels = models.filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent") && !m.name.includes("gemini-2.0") ); 
@@ -187,6 +210,137 @@
                 reader.readAsDataURL(file); 
             }); 
         } 
+
+        // ★追加：DOMを構築し、入力フィールドを生成する関数
+        function renderTable(data) {
+            const tbody = document.querySelector('#result-table tbody');
+            tbody.innerHTML = '';
+
+            data.rows.forEach((row, index) => {
+                const tr = document.createElement('tr');
+                tr.id = `row-${index}`; // 行を一意に特定するためのID
+
+                // 編集可能なinputタグを生成するヘルパー関数
+                const createInput = (field, val) => {
+                    return `<input type="number" step="any" class="editable-input" data-index="${index}" data-field="${field}" value="${val !== null ? val : ''}">`;
+                };
+
+                tr.innerHTML = `
+                    <td>${row.sokuten || ''}</td>
+                    <td>${createInput('tan_kyori', row.tan_kyori)}</td>
+                    <td>${createInput('hyojun_tanka', row.hyojun_tanka)}</td>
+                    <td>
+                        ${createInput('heikin_tanka', row.heikin_tanka)}
+                        <span class="err-heikin"></span>
+                    </td>
+                    <td>
+                        ${createInput('kojihi', row.kojihi)}
+                        <span class="err-kojihi"></span>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            // すべての入力フィールドに変更イベントを監視
+            document.querySelectorAll('.editable-input').forEach(input => {
+                input.addEventListener('input', (e) => {
+                    const idx = parseInt(e.target.dataset.index);
+                    const field = e.target.dataset.field;
+                    // 空欄の場合はnull、それ以外は数値として保存
+                    const val = e.target.value !== '' ? parseFloat(e.target.value) : null;
+                    
+                    // データを更新してハイライトクラスを付与
+                    currentData.rows[idx][field] = val;
+                    e.target.classList.add('edited');
+                    
+                    // 全体を再計算（DOMの再構築はせず、エラーメッセージだけ書き換える）
+                    recalculate(currentData);
+                });
+            });
+
+            // 初回の検算を実行
+            recalculate(data);
+        }
+
+        // ★追加：データをもとにエラー判定とサマリーを更新する関数（入力フォーカスを奪わない）
+        function recalculate(data) {
+            let prevTanka = 0;
+            let calcTotalKojihi = 0;
+            let calcTotalKyori = 0;
+            let errorCount = 0;
+
+            data.rows.forEach((row, index) => {
+                const tr = document.getElementById(`row-${index}`);
+                const errHeikin = tr.querySelector('.err-heikin');
+                const errKojihi = tr.querySelector('.err-kojihi');
+                
+                // 初期化
+                errHeikin.innerHTML = '';
+                errKojihi.innerHTML = '';
+                tr.classList.remove('error-row');
+
+                let currentTanka = row.hyojun_tanka || 0;
+                let tanKyori = row.tan_kyori || 0;
+
+                // 測点が「-BP」で終わる行は前行単価が0円扱い
+                if (row.sokuten && row.sokuten.includes('-BP')) {
+                    prevTanka = 0;
+                }
+
+                let expectedHeikin = Math.floor((prevTanka + currentTanka) / 2);
+                let expectedKojihi = null;
+                let isError = false;
+                
+                // 単距離が入力されている行のみ平均単価と工事費をチェック
+                if (tanKyori > 0) {
+                    if (row.heikin_tanka !== null && row.heikin_tanka !== expectedHeikin) {
+                        isError = true;
+                        errHeikin.innerHTML = `<br><span class="error-text">平均単価 NG (正解: ${expectedHeikin})</span>`;
+                    }
+
+                    expectedKojihi = Math.floor(tanKyori * expectedHeikin);
+                    if (row.kojihi !== null && row.kojihi !== expectedKojihi) {
+                        isError = true;
+                        errKojihi.innerHTML = `<br><span class="error-text">工事費 NG (正解: ${expectedKojihi.toLocaleString()})</span>`;
+                    }
+                    calcTotalKojihi += expectedKojihi;
+                    calcTotalKyori += tanKyori;
+                }
+
+                // 次の行のために単価を記憶
+                prevTanka = currentTanka;
+
+                if (isError) {
+                    tr.classList.add('error-row');
+                    errorCount++;
+                }
+            });
+
+            // ======= 総合判定 =======
+            const summaryArea = document.getElementById('summary-area');
+            calcTotalKyori = Math.round(calcTotalKyori * 10) / 10;
+            
+            let isTotalKojihiMatch = calcTotalKojihi === data.total_kojihi;
+            let isTotalKyoriMatch = calcTotalKyori === data.total_kyori;
+
+            let summaryHTML = '';
+            if (errorCount === 0 && isTotalKojihiMatch && isTotalKyoriMatch) {
+                summaryArea.className = 'summary-box';
+                summaryHTML = `<h3>✅ すべての計算が正確です</h3>`;
+            } else {
+                summaryArea.className = 'summary-box has-error';
+                summaryHTML = `<h3>⚠️ 計算エラーが ${errorCount} 箇所見つかりました</h3>`;
+            }
+
+            summaryHTML += `
+                <ul>
+                    <li><strong>単距離の合計値:</strong> 設計書 ${data.total_kyori}m (正確な検算: ${calcTotalKyori}m)${isTotalKyoriMatch ? '✅' : '❌'}</li>
+                    <li><strong>直接工事費計:</strong> 設計書 ${data.total_kojihi ? data.total_kojihi.toLocaleString() : '読取不可'}円 (正確な検算: ${calcTotalKojihi.toLocaleString()}円) ${isTotalKojihiMatch ? '✅' : '❌'}</li>
+                </ul>
+            `;
+            summaryArea.innerHTML = summaryHTML;
+        }
+
         
         btn.addEventListener('click', async () => { 
             const apiKey = apiKeyInput.value.trim(); 
@@ -255,101 +409,9 @@
                 let text = await result.response.text();
                 text = text.replace(/```json/g, '').replace(/```/g, '').trim();
                 
-                const data = JSON.parse(text);
-                
-                // ======= JavaScriptによる正確な検算エンジン =======
-                const tbody = document.querySelector('#result-table tbody');
-                tbody.innerHTML = '';
-                
-                let prevTanka = 0;
-                let calcTotalKojihi = 0;
-                let calcTotalKyori = 0;
-                let errorCount = 0;
-
-                data.rows.forEach((row) => {
-                    let tr = document.createElement('tr');
-                    let isError = false;
-                    let errorDetails = [];
-
-                    let currentTanka = row.hyojun_tanka || 0;
-                    let tanKyori = row.tan_kyori || 0;
-
-                    // 測点が「-BP」で終わる行は前行単価が0円扱い
-                    if (row.sokuten && row.sokuten.includes('-BP')) {
-                        prevTanka = 0;
-                    }
-
-                    // 1. 標準単価平均の検算: INT((前行 + 当該行) / 2)
-                    let expectedHeikin = Math.floor((prevTanka + currentTanka) / 2);
-                    let expectedKojihi = null;
-                    
-                    // ★改良：単距離が入力されている行のみ平均単価と工事費をチェックする
-                    if (tanKyori > 0) {
-                        // 画像の読み取り値と比較
-                        if (row.heikin_tanka !== null && row.heikin_tanka !== expectedHeikin) {
-                            isError = true;
-                            errorDetails.push(`平均単価 NG (正解: ${expectedHeikin})`);
-                        }
-
-                        // 2. 直接工事費の検算: INT(単距離 * 平均単価)
-                        expectedKojihi = Math.floor(tanKyori * expectedHeikin);
-                        if (row.kojihi !== null && row.kojihi !== expectedKojihi) {
-                            isError = true;
-                            errorDetails.push(`工事費 NG (正解: ${expectedKojihi.toLocaleString()})`);
-                        }
-                        calcTotalKojihi += expectedKojihi;
-                        calcTotalKyori += tanKyori;
-                    }
-
-                    // 次の行のために単価を記憶
-                    prevTanka = currentTanka;
-
-                    if (isError) {
-                        tr.className = 'error-row';
-                        errorCount++;
-                    }
-
-                    tr.innerHTML = `
-                        <td>${row.sokuten || ''}</td>
-                        <td>${tanKyori > 0 ? tanKyori : ''}</td>
-                        <td>${row.hyojun_tanka !== null ? row.hyojun_tanka.toLocaleString() : ''}</td>
-                        <td>
-                            ${row.heikin_tanka !== null ? row.heikin_tanka.toLocaleString() : ''}
-                            ${errorDetails.filter(e => e.includes('平均単価')).map(e => `<span class="error-text">${e}</span>`).join('')}
-                        </td>
-                        <td>
-                            ${row.kojihi !== null ? row.kojihi.toLocaleString() : ''}
-                            ${errorDetails.filter(e => e.includes('工事費')).map(e => `<span class="error-text">${e}</span>`).join('')}
-                        </td>
-                    `;
-                    tbody.appendChild(tr);
-                });
-
-                // ======= 総合判定 =======
-                const summaryArea = document.getElementById('summary-area');
-                let summaryHTML = '';
-                
-                // 距離と金額の総合計チェック (小数誤差を防ぐための丸め)
-                calcTotalKyori = Math.round(calcTotalKyori * 10) / 10;
-                let isTotalKojihiMatch = calcTotalKojihi === data.total_kojihi;
-                let isTotalKyoriMatch = calcTotalKyori === data.total_kyori;
-
-                if (errorCount === 0 && isTotalKojihiMatch && isTotalKyoriMatch) {
-                    summaryArea.className = 'summary-box';
-                    summaryHTML = `<h3>✅ すべての計算が正確です</h3>`;
-                } else {
-                    summaryArea.className = 'summary-box has-error';
-                    summaryHTML = `<h3>⚠️ 計算エラーが ${errorCount} 箇所見つかりました</h3>`;
-                }
-
-                summaryHTML += `
-                    <ul>
-                        <li><strong>単距離の合計値:</strong> 設計書 ${data.total_kyori}m (正確な検算: ${calcTotalKyori}m) ${isTotalKyoriMatch ? '✅' : '❌'}</li>
-                        <li><strong>直接工事費計:</strong> 設計書 ${data.total_kojihi ? data.total_kojihi.toLocaleString() : '読取不可'}円 (正確な検算: ${calcTotalKojihi.toLocaleString()}円) ${isTotalKojihiMatch ? '✅' : '❌'}</li>
-                    </ul>
-                `;
-                summaryArea.innerHTML = summaryHTML;
-
+                // パースしたデータをグローバル変数に格納し、描画関数に渡す
+                currentData = JSON.parse(text);
+                renderTable(currentData);
                 resultArea.style.display = 'block';
 
             } catch (error) {
