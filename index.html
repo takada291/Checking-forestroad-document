@@ -103,7 +103,7 @@
 <body>
 
     <div class="container">
-        <h1>クローラ明細確認 v0.8</h1>
+        <h1>クローラ明細確認 v1.0</h1>
         
         <div class="api-note">
             <strong>APIキー設定（初回のみ）</strong><br>
@@ -155,22 +155,17 @@
         const imageInput = document.getElementById('image-upload');
 
         let currentData = null;
-        let audioCtx = null; // ★追加：AudioContextをグローバルに保持
+        let audioCtx = null; 
 
         const savedKey = localStorage.getItem('gemini_api_key_check');
         if(savedKey) apiKeyInput.value = savedKey;
 
-        // ★追加：iOSのオーディオロックを解除する関数（ボタンを押した瞬間に実行）
+        // iOSオーディオロック解除
         function unlockAudio() {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
             if (!AudioContext) return;
-            if (!audioCtx) {
-                audioCtx = new AudioContext();
-            }
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume();
-            }
-            // 無音を0.01秒だけ鳴らしてロックを解除する
+            if (!audioCtx) audioCtx = new AudioContext();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
             gain.gain.value = 0;
@@ -180,7 +175,7 @@
             osc.stop(audioCtx.currentTime + 0.01);
         }
 
-        // ★変更：保持しているaudioCtxを使って音を鳴らす
+        // ビープ音
         function playSound(type) {
             if (!audioCtx) return;
             if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -189,10 +184,8 @@
                 [0, 0.2, 0.4].forEach(delay => {
                     const osc = audioCtx.createOscillator();
                     const gain = audioCtx.createGain();
-                    osc.connect(gain);
-                    gain.connect(audioCtx.destination);
-                    osc.type = 'sine';
-                    osc.frequency.value = 880; 
+                    osc.connect(gain); gain.connect(audioCtx.destination);
+                    osc.type = 'sine'; osc.frequency.value = 880; 
                     gain.gain.setValueAtTime(0.1, audioCtx.currentTime + delay);
                     osc.start(audioCtx.currentTime + delay);
                     osc.stop(audioCtx.currentTime + delay + 0.1);
@@ -200,34 +193,66 @@
             } else if (type === 'error') {
                 const osc = audioCtx.createOscillator();
                 const gain = audioCtx.createGain();
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.type = 'sawtooth';
-                osc.frequency.value = 150; 
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                osc.type = 'sawtooth'; osc.frequency.value = 150; 
                 gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
                 osc.start(audioCtx.currentTime);
                 osc.stop(audioCtx.currentTime + 0.5);
             }
         }
 
-        async function findAvailableModel(apiKey) {
-            try {
-                loadingDetail.innerText = "最適なAIモデルを探しています...";
-                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`); 
-                if (!response.ok) throw new Error("モデルリストの取得に失敗"); 
-                const data = await response.json(); 
-                const models = data.models || []; 
-                const capableModels = models.filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent") && !m.name.includes("gemini-2.0") ); 
-                let bestModel = capableModels.find(m => m.name.includes("gemini-1.5-pro")); 
-                if (!bestModel) bestModel = capableModels.find(m => m.name.includes("gemini-1.5-flash")); 
-                if (!bestModel && capableModels.length > 0) bestModel = capableModels[0]; 
-                if (bestModel) return bestModel.name.replace("models/", ""); 
-                return "gemini-1.5-flash"; 
-            } catch (e) { 
-                console.warn("モデル自動検出失敗:", e); 
-                return "gemini-1.5-flash"; 
-            } 
-        } 
+        // 施業提案アプリと同様の堅牢なフォールバック＆タイムアウト付き通信・モデル候補設定 (3.6最優先)
+        const MODEL_CANDIDATES = ["gemini-3.6-flash", "gemini-2.5-flash"];
+
+        async function fetchWithTimeout(url, options, timeoutMs = 45000) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try { return await fetch(url, { ...options, signal: controller.signal }); } 
+            finally { clearTimeout(timer); }
+        }
+
+        async function callGeminiWithFallback(apiKey, basePayload, onStatusUpdate) {
+            let lastErrorMsg = "";
+            for (const modelName of MODEL_CANDIDATES) {
+                if (onStatusUpdate) onStatusUpdate(modelName);
+                const isGemini3 = modelName.startsWith("gemini-3");
+                const payloadWithThinking = JSON.parse(JSON.stringify(basePayload));
+                if (isGemini3) {
+                    payloadWithThinking.generationConfig = {
+                        ...(payloadWithThinking.generationConfig || {}),
+                        thinkingConfig: { thinkingLevel: "LOW" }
+                    };
+                }
+                try {
+                    let response = await fetchWithTimeout(
+                        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+                        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadWithThinking) },
+                        45000
+                    );
+                    let data = await response.json();
+                    if (data.error && response.status === 400 && isGemini3) {
+                        response = await fetchWithTimeout(
+                            `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+                            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(basePayload) },
+                            45000
+                        );
+                        data = await response.json();
+                    }
+                    if (data.error) {
+                        lastErrorMsg = `[${modelName}] ${data.error.message}`;
+                        continue;
+                    }
+                    if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+                        const parts = data.candidates[0].content.parts || [];
+                        const answerPart = parts.find(p => typeof p.text === 'string' && !p.thought) || parts.find(p => typeof p.text === 'string');
+                        if (answerPart) { return { text: answerPart.text, usedModel: modelName }; }
+                    }
+                } catch (err) {
+                    lastErrorMsg = `[${modelName}] ${err.name === 'AbortError' ? 'タイムアウト(45秒超過)' : err.message}`;
+                }
+            }
+            throw new Error(lastErrorMsg || "AIモデルでの通信に失敗しました。APIキーや利用制限をご確認ください。");
+        }
         
         async function fileToGenerativePart(file) { 
             return new Promise((resolve) => { 
@@ -332,7 +357,6 @@
         }
 
         btn.addEventListener('click', async () => { 
-            // ★追加：ボタンを押した瞬間にiOSのオーディオ制限を解除する
             unlockAudio();
 
             const apiKey = apiKeyInput.value.trim(); 
@@ -345,25 +369,23 @@
             btn.disabled = true; loading.style.display = 'block'; resultArea.style.display = 'none'; 
             
             try { 
-                const modelName = await findAvailableModel(apiKey); 
-                loadingDetail.innerText = `画像読取・検算中 (${modelName}を使用)...`;
+                let activeModelName = "準備中";
+                loadingDetail.innerText = "最適なAIモデルを探しています...";
 
-                const genAI = new GoogleGenerativeAI(apiKey);
-                const model = genAI.getGenerativeModel({ model: modelName });
                 const prompt = `
                     あなたは建設現場の設計書を厳密にチェックするアシスタントです。
                     添付された画像は、連続した森林作業道の「直接工事費明細表」です。
                     画像1枚目から順番に表のデータ行を読み取り、以下のJSONフォーマットで出力してください。
 
                     【非常に重要：AIの推測（忖度）を禁止】
-                    1. 「標準単価（hyojun_tanka）」の列において、同じ数字が連続しているように見えても、AIの判断で勝手に前後の行と同じ数字を出力しないでください。1行ずつ独立して画像を読み取ってください。（例：2767が連続する中で突然1652が混ざっている箇所を絶対に見落とさないこと）。
+                    1. 「標準単価（hyojun_tanka）」の列において、同じ数字が連続しているように見えても、AIの判断で勝手に前後の行と同じ数字を出力しないでください。1行ずつ独立して画像を読み取ってください。
                     2. 「A-BP」など、最初の行で「単距離」が空欄であっても、「標準単価」に数字があれば必ず読み取ってください。
                     3. 画像の中の数値には、わざと計算間違いや異常な数値が含まれています。自動計算で修正せず、見たままの数値をそのまま抽出してください。
 
                     {
                       "rows": [
                         { "sokuten": "A-BP", "tan_kyori": null, "hyojun_tanka": 578, "heikin_tanka": null, "kojihi": null },
-                        { "sokuten": "A-1", "tan_kyori": 17.0, "hyojun_tanka": 578, "heikin_tanka": 578, "kojihi": 9826 }
+                        { "sokuten": "A-1", "tan_kyori": 17.0, "hyojun_tanka": 578, "heikin_tanna": 578, "kojihi": 9826 }
                       ],
                       "total_kyori": 1285.8, "total_kojihi": 2663196
                     }
@@ -376,9 +398,27 @@
                 `;
 
                 const imageParts = await Promise.all([...files].map(fileToGenerativePart));
-                const result = await model.generateContent([prompt, ...imageParts]);
-                let text = await result.response.text();
-                text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+                
+                const basePayload = {
+                    contents: [
+                        {
+                            parts: [
+                                { text: prompt },
+                                ...imageParts
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        response_mime_type: "application/json"
+                    }
+                };
+
+                const res = await callGeminiWithFallback(apiKey, basePayload, (m) => {
+                    activeModelName = m;
+                    loadingDetail.innerText = `画像読取・検算中 (${activeModelName}を使用)...`;
+                });
+
+                let text = res.text.replace(/```json/g, '').replace(/```/g, '').trim();
                 
                 currentData = JSON.parse(text);
                 renderTable(currentData);
