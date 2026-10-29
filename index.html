@@ -103,7 +103,7 @@
 <body>
 
     <div class="container">
-        <h1>クローラ明細確認 v1.0</h1>
+        <h1>クローラ明細確認 v1.1</h1>
         
         <div class="api-note">
             <strong>APIキー設定（初回のみ）</strong><br>
@@ -201,10 +201,10 @@
             }
         }
 
-        // 施業提案アプリと同様の堅牢なフォールバック＆タイムアウト付き通信・モデル候補設定 (3.6最優先)
+        // タイムアウトを90秒に拡張
         const MODEL_CANDIDATES = ["gemini-3.6-flash", "gemini-2.5-flash"];
 
-        async function fetchWithTimeout(url, options, timeoutMs = 45000) {
+        async function fetchWithTimeout(url, options, timeoutMs = 90000) {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeoutMs);
             try { return await fetch(url, { ...options, signal: controller.signal }); } 
@@ -227,14 +227,14 @@
                     let response = await fetchWithTimeout(
                         `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
                         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadWithThinking) },
-                        45000
+                        90000
                     );
                     let data = await response.json();
                     if (data.error && response.status === 400 && isGemini3) {
                         response = await fetchWithTimeout(
                             `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
                             { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(basePayload) },
-                            45000
+                            90000
                         );
                         data = await response.json();
                     }
@@ -248,7 +248,7 @@
                         if (answerPart) { return { text: answerPart.text, usedModel: modelName }; }
                     }
                 } catch (err) {
-                    lastErrorMsg = `[${modelName}] ${err.name === 'AbortError' ? 'タイムアウト(45秒超過)' : err.message}`;
+                    lastErrorMsg = `[${modelName}] ${err.name === 'AbortError' ? 'タイムアウト(90秒超過)' : err.message}`;
                 }
             }
             throw new Error(lastErrorMsg || "AIモデルでの通信に失敗しました。APIキーや利用制限をご確認ください。");
@@ -385,7 +385,7 @@
                     {
                       "rows": [
                         { "sokuten": "A-BP", "tan_kyori": null, "hyojun_tanka": 578, "heikin_tanka": null, "kojihi": null },
-                        { "sokuten": "A-1", "tan_kyori": 17.0, "hyojun_tanka": 578, "heikin_tanna": 578, "kojihi": 9826 }
+                        { "sokuten": "A-1", "tan_kyori": 17.0, "hyojun_tanka": 578, "heikin_tanka": 578, "kojihi": 9826 }
                       ],
                       "total_kyori": 1285.8, "total_kojihi": 2663196
                     }
