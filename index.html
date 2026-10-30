@@ -103,7 +103,7 @@
 <body>
 
     <div class="container">
-        <h1>クローラ明細確認 v1.1</h1>
+        <h1>クローラ明細確認 v1.2</h1>
         
         <div class="api-note">
             <strong>APIキー設定（初回のみ）</strong><br>
@@ -202,7 +202,7 @@
         }
 
         // タイムアウトを90秒に拡張
-        const MODEL_CANDIDATES = ["gemini-3.6-flash", "gemini-2.5-flash"];
+        const MODEL_CANDIDATES = ["gemini-3.8-flash", "gemini-2.5-flash"];
 
         async function fetchWithTimeout(url, options, timeoutMs = 90000) {
             const controller = new AbortController();
